@@ -193,3 +193,12 @@ glm/
 _examples_synced/
 .env
 .DS_Store
+
+.triton
+
+models
+.agents
+tmp*
+.netrc
+Megatron-LM/
+data/
