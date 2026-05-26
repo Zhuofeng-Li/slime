@@ -1,7 +1,7 @@
 #!/bin/bash
 # Usage: bash scripts/frontier_cs/run-frontiercs-qwen3.5-35B-A3B.sh
 #
-# FrontierCS GRPO training on Qwen3.5-35B-A3B (8x GPU).
+# FrontierCS GRPO training on Qwen3.5-35B-A3B (8x GPU, 1 data item).
 # Parameters aligned with FrontierCS Qwen3.5-27B VERL config:
 #   lr=5e-7, kl_loss_coef=0.001, n_samples=8, batch_size=8, max_response=32000
 #
@@ -41,7 +41,7 @@ fi
 echo "HAS_NVLINK: $HAS_NVLINK (detected $NVLINK_COUNT NVLink references)"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-SLIME_DIR="$(cd -- "${SCRIPT_DIR}/.." &>/dev/null && pwd)"
+SLIME_DIR="$(cd -- "${SCRIPT_DIR}/../.." &>/dev/null && pwd)"
 source "${SLIME_DIR}/scripts/models/qwen3.5-35B-A3B.sh"
 
 # ── Checkpoints ───────────────────────────────────────────────────────────
@@ -65,16 +65,18 @@ ROLLOUT_ARGS=(
    --rollout-shuffle
 
    --custom-rm-path "FrontierSmith.slime_rm.frontiercs_rm.batched_custom_rm"
+   --custom-rollout-log-function-path "scripts.frontier_cs.rollout_wandb.log_rollout_data"
+   --save-debug-rollout-data "${BASE_FOLDER}/logs/frontiercs_rollouts/qwen3.5-35B-A3B/{rollout_id}.pt"
 
    # 10 FrontierSmith synthetic problems × 60 epochs ÷ batch_size 8 = 75 rollouts
    # Adjust --num-rollout if using more problems (172 numeric-ID problems × 60 ÷ 8 ≈ 1290)
-   --num-rollout 1290
-   --rollout-batch-size 8
-   --n-samples-per-prompt 8
-   --rollout-max-response-len 32000
+   --num-rollout 100
+   --rollout-batch-size 1
+   --n-samples-per-prompt 256
+   --rollout-max-response-len 81920
    --rollout-temperature 1.0
 
-   --global-batch-size 64
+   --global-batch-size 256
    --balance-data
 )
 
@@ -85,7 +87,7 @@ EVAL_ARGS=(
    --eval-interval 5
    --eval-prompt-data frontiercs "${BASE_FOLDER}/data/frontiercs/val.jsonl"
    --n-samples-per-eval-prompt 5
-   --eval-max-response-len 32000
+   --eval-max-response-len 81920
    --eval-top-p 1.0
 )
 
@@ -103,7 +105,7 @@ PERF_ARGS=(
    --recompute-num-layers 1
 
    --use-dynamic-batch-size
-   --max-tokens-per-gpu 20480
+   --max-tokens-per-gpu 16384
 )
 
 # ── GRPO (from FrontierCS 27B) ────────────────────────────────────────────
@@ -144,6 +146,7 @@ SGLANG_ARGS=(
    --rollout-num-gpus-per-engine 8
    --sglang-mem-fraction-static 0.7
    --sglang-cuda-graph-bs 1 2 4 8 $(seq 16 8 256)
+   --sglang-disable-custom-all-reduce
 )
 
 # ── Misc ──────────────────────────────────────────────────────────────────
@@ -164,12 +167,14 @@ RUNTIME_ENV_JSON="{
     \"PYTHONPATH\": \"/root/Megatron-LM/:/root/slime:/root/slime/FrontierSmith\",
     \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
     \"NCCL_NVLS_ENABLE\": \"${HAS_NVLINK}\",
-    \"FRONTIER_JUDGE_URL\": \"http://localhost:8082\"
+    \"FRONTIER_JUDGE_URL\": \"http://localhost:8082\",
+    \"SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK\": \"false\"
   }
 }"
 
-ray job submit --address="http://127.0.0.1:8265" \
+JOB_SUBMIT_OUT=$(ray job submit --address="http://127.0.0.1:8265" \
    --runtime-env-json="${RUNTIME_ENV_JSON}" \
+   --no-wait \
    -- python3 "${SLIME_DIR}/train.py" \
    --actor-num-nodes 1 \
    --actor-num-gpus-per-node 8 \
@@ -183,4 +188,19 @@ ray job submit --address="http://127.0.0.1:8265" \
    "${PERF_ARGS[@]}" \
    "${EVAL_ARGS[@]}" \
    "${SGLANG_ARGS[@]}" \
-   "${MISC_ARGS[@]}"
+   "${MISC_ARGS[@]}")
+JOB_ID=$(echo "$JOB_SUBMIT_OUT" | grep -oP "raysubmit_\w+" | head -1)
+echo "Job submitted: $JOB_ID"
+
+# Follow logs; retry if WebSocket drops (1006)
+while true; do
+    ray job logs --follow "$JOB_ID" 2>/dev/null || true
+    STATUS=$(ray job status "$JOB_ID" 2>/dev/null | grep -oP "Status:\s*\K\w+")
+    echo "Job status: $STATUS"
+    if [[ "$STATUS" == "SUCCEEDED" || "$STATUS" == "FAILED" || "$STATUS" == "STOPPED" ]]; then
+        echo "Job ended with status: $STATUS"
+        [[ "$STATUS" == "SUCCEEDED" ]] && exit 0 || exit 1
+    fi
+    echo "Log stream dropped, retrying in 10s..."
+    sleep 10
+done

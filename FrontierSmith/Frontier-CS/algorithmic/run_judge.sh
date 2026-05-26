@@ -11,19 +11,19 @@ cd "$(dirname "$0")"
 # docker build -t frontiercs-judge .
 
 # Stop existing container if any
-docker rm -f Competitive-Programming 2>/dev/null || true
+sudo docker rm -f Competitive-Programming 2>/dev/null || true
 
 # Run
 echo "Starting container..."
-docker run -d \
+sudo docker run -d \
   --name Competitive-Programming \
   --privileged \
   --shm-size=4g \
   -p 8082:8082 \
   -e PORT=8082 \
   -e GJ_ADDR=http://127.0.0.1:5050 \
-  -e JUDGE_WORKERS=8 \
-  -e GJ_PARALLELISM=8 \
+  -e JUDGE_WORKERS=32 \
+  -e GJ_PARALLELISM=32 \
   -e SAVE_OUTPUTS=false \
   -v "$(pwd)/problems:/app/problems" \
   -v "$(pwd)/submissions:/app/submissions" \

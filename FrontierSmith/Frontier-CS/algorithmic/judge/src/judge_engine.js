@@ -243,8 +243,6 @@ export class JudgeEngine {
             cpuLimit: toNs(caseItem.time),
             clockLimit: toNs(caseItem.time) * 2,
             memoryLimit: toBytes(caseItem.memory),
-            stackLimit: toBytes(caseItem.memory),
-            addressSpaceLimit: true,
             procLimit: 128,
             copyIn: { ...runSpec.preparedCopyIn }
         });
@@ -274,7 +272,6 @@ export class JudgeEngine {
             cpuLimit: 10e9, // 10 seconds
             clockLimit: 20e9,
             memoryLimit: 256 << 20,
-            stackLimit: 256 << 20,
             procLimit: 128,
             copyIn: {
                 'chk': { fileId: checkerId },
@@ -316,7 +313,6 @@ export class JudgeEngine {
                     cpuLimit: toNs(caseItem.time),
                     clockLimit: toNs(caseItem.time) * 2,
                     memoryLimit: toBytes(caseItem.memory),
-                    stackLimit: toBytes(caseItem.memory),
                     procLimit: 128,
                     copyIn: { ...runSpec.preparedCopyIn },
                 },
@@ -327,7 +323,6 @@ export class JudgeEngine {
                     cpuLimit: toNs(caseItem.time) * 4,
                     clockLimit: toNs(caseItem.time) * 4 * 2,
                     memoryLimit: toBytes(caseItem.memory) * 4,
-                    stackLimit: toBytes(caseItem.memory) * 4,
                     procLimit: 128,
                     copyIn: {
                         'interactor': { fileId: interactorId },

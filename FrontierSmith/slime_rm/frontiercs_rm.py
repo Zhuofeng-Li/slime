@@ -112,7 +112,13 @@ async def _score_one(sample: "Sample") -> float:
 
 # ── SLIME batched interface ───────────────────────────────────────────────
 
-async def batched_custom_rm(args: Any, samples: list["Sample"]) -> list[float]:
-    """Concurrently score all samples against the Frontier-CS judge."""
+async def batched_custom_rm(args: Any, samples) -> "list[float] | float":
+    """Score samples against the Frontier-CS judge.
+
+    Accepts either a single Sample (called via async_rm) or a list of Samples
+    (called via batched_async_rm).
+    """
+    if not isinstance(samples, list):
+        return await _score_one(samples)
     tasks = [_score_one(s) for s in samples]
     return list(await asyncio.gather(*tasks))
