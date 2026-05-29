@@ -31,6 +31,11 @@ def add_convertion_args(parser):
         parser.add_argument("--padded-vocab-size", type=int, default=None)
     except Exception:
         pass
+    parser.add_argument(
+        "--disable-auto-pipeline-parallel",
+        action="store_true",
+        help="Keep the requested pipeline parallel size instead of expanding PP to the conversion world size.",
+    )
     return parser
 
 
@@ -52,7 +57,11 @@ def get_args():
     def ceildiv(a, b):
         return -(a // -b)
 
-    if args.pipeline_model_parallel_size == 1 and world_size > 1:
+    if (
+        args.pipeline_model_parallel_size == 1
+        and world_size > 1
+        and not args.disable_auto_pipeline_parallel
+    ):
         pp_size = world_size
         while True:
             args.pipeline_model_parallel_size = pp_size

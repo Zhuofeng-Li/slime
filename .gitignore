@@ -197,8 +197,12 @@ _examples_synced/
 .triton
 
 models
+!scripts/models/
+!scripts/models/qwen3.5-9B.sh
 .agents
 tmp*
 .netrc
 Megatron-LM/
 data/
+logs
+todo.md

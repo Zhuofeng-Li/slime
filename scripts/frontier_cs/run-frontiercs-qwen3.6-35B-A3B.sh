@@ -2,8 +2,9 @@
 # Usage: bash scripts/frontier_cs/run-frontiercs-qwen3.6-35B-A3B.sh
 #
 # FrontierCS GRPO training on Qwen3.6-35B-A3B (8x GPU, 1 data item).
-# Parameters aligned with FrontierCS Qwen3.5-35B-A3B config:
-#   lr=5e-7, kl_loss_coef=0.001, n_samples=256, batch_size=1, max_response=81920
+# Parameters aligned with FrontierCS Qwen3.5-35B-A3B config, with a smaller
+# first-update step for Qwen3.6 stability:
+#   lr=5e-8, kl_loss_coef=0.001, n_samples=256, batch_size=1, max_response=81920
 #
 # Prerequisites:
 #   1. uv run python scripts/frontier_cs/prepare_frontiercs_jsonl.py --full-for-both
@@ -84,7 +85,6 @@ ROLLOUT_ARGS=(
 # Eval also goes through the same judge via --custom-rm-path (set globally above).
 # val.jsonl contains all problems (--full-for-both) so we get full coverage.
 EVAL_ARGS=(
-   --eval-interval 50000
    --eval-prompt-data frontiercs "${BASE_FOLDER}/data/frontiercs/val.jsonl"
    --n-samples-per-eval-prompt 5
    --eval-max-response-len 81920
@@ -105,13 +105,13 @@ PERF_ARGS=(
    --recompute-num-layers 1
 
    --use-dynamic-batch-size
-   --max-tokens-per-gpu 16384
+   --max-tokens-per-gpu 60000
 )
 
 # ── GRPO (from FrontierCS 27B) ────────────────────────────────────────────
 GRPO_ARGS=(
    --advantage-estimator grpo
-   --use-kl-loss
+      --use-kl-loss
    --kl-loss-coef 0.001
    --kl-loss-type low_var_kl
    --entropy-coef 0.0
@@ -122,11 +122,17 @@ GRPO_ARGS=(
 # ── Optimizer (from FrontierCS 27B: lr=5e-7) ─────────────────────────────
 OPTIMIZER_ARGS=(
    --optimizer adam
-   --lr 5e-7
+   --lr 5e-8
    --lr-decay-style constant
    --weight-decay 0.1
    --adam-beta1 0.9
    --adam-beta2 0.98
+   --clip-grad 0.05
+
+   # Qwen3.6 collapses into multilingual token soup after the first full-model
+   # RL update. Keep the hybrid attention/embeddings/lm_head fixed and update
+   # only MoE MLP parameters while preserving the 81920 response length.
+   --only-train-params-name-list "mlp\\."
 
    --optimizer-cpu-offload
    --overlap-cpu-optimizer-d2h-h2d
@@ -148,6 +154,8 @@ SGLANG_ARGS=(
    --rollout-num-gpus-per-engine 8
    --sglang-mem-fraction-static 0.7
    --sglang-cuda-graph-bs 1 2 4 8 $(seq 16 8 256)
+   --sglang-max-running-requests 64
+   --sglang-server-concurrency 64
    --sglang-disable-custom-all-reduce
    --sglang-mamba-scheduler-strategy extra_buffer
 )
@@ -159,6 +167,9 @@ MISC_ARGS=(
    --accumulate-allreduce-grads-in-fp32
    --attention-softmax-in-fp32
    --attention-backend flash
+   --log-probs-chunk-size 4096
+   --train-memory-margin-bytes 0
+   --train-env-vars '{"PYTORCH_CUDA_ALLOC_CONF":"max_split_size_mb:512"}'
 )
 
 export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"

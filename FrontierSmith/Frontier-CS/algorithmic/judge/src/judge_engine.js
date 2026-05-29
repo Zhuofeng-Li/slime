@@ -278,10 +278,12 @@ export class JudgeEngine {
                 'in.txt': { content: inf },
                 'out.txt': { content: out },
                 'ans.txt': { content: ans }
-            }
+            },
+            copyOut: ['stdout', 'stderr']
         });
 
-        const ok = chkRes.status === 'Accepted' && chkRes.exitStatus === 0;
+        const checkerExitedOk = chkRes.exitStatus === undefined || chkRes.exitStatus === 0;
+        const ok = chkRes.status === 'Accepted' && checkerExitedOk;
         return {
             ok,
             status: ok ? 'Accepted' : 'Wrong Answer',
@@ -558,4 +560,3 @@ export class JudgeEngine {
         }
     }
 }
-

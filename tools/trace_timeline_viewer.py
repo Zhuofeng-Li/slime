@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import argparse
 import functools
+import html
 import json
 import pickle
+import re
 import socketserver
 import sys
 import time
@@ -24,7 +26,7 @@ from typing import Any
 import torch
 
 
-CACHE_VERSION = 1
+CACHE_VERSION = 5
 
 
 class _MissingPickleObject:
@@ -87,6 +89,14 @@ class TimelinePaths:
     html_path: Path
 
 
+@dataclass
+class TimelineEntry:
+    key: str
+    title: str
+    data: Any
+    paths: TimelinePaths
+
+
 def _json_safe(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
@@ -110,6 +120,26 @@ def _compact_text(value: Any, max_len: int = 256) -> Any:
     if len(value) <= max_len:
         return value
     return f"{value[:max_len]}...<truncated:{len(value)}>"
+
+
+def _detail_text(value: Any) -> Any:
+    return _json_safe(value)
+
+
+def _extract_cpp_block(response: Any) -> str | None:
+    if not isinstance(response, str) or not response:
+        return None
+    match = re.findall(r"```(?:cpp|c\+\+)?\s*\n(.*?)```", response, re.DOTALL)
+    if match:
+        return max(match, key=len).strip()
+    stripped = response.strip()
+    for prefix in ("```cpp", "```c++", "```"):
+        if stripped.startswith(prefix):
+            stripped = stripped[len(prefix) :].strip()
+            break
+    if stripped.endswith("```"):
+        stripped = stripped[:-3].strip()
+    return stripped or None
 
 
 def _safe_duration(start: float | None, end: float | None) -> float | None:
@@ -539,6 +569,7 @@ def _build_items_from_trace(sample: dict[str, Any], sample_idx: int) -> dict[str
     reward = sample.get("reward")
     if isinstance(reward, dict):
         reward = _json_safe(reward)
+    response = sample.get("response")
 
     return {
         "row_id": sample_idx,
@@ -548,6 +579,12 @@ def _build_items_from_trace(sample: dict[str, Any], sample_idx: int) -> dict[str
         "status": _compact_text(sample.get("status"), max_len=64),
         "label": _compact_text(sample.get("label"), max_len=256),
         "reward": reward,
+        "prompt": _detail_text(sample.get("prompt")),
+        "response": _detail_text(response),
+        "response_cpp": _extract_cpp_block(response),
+        "response_char_count": len(response) if isinstance(response, str) else None,
+        "response_length": _json_safe(sample.get("response_length")),
+        "metadata": _json_safe(metadata),
         "trace_id": _json_safe(trace.get("trace_id")),
         "attempt": int(trace.get("attempt", 0) or 0),
         "start": row_start,
@@ -565,7 +602,11 @@ def _build_items_from_trace(sample: dict[str, Any], sample_idx: int) -> dict[str
     }
 
 
-def _build_cache_data(pt_path: Path) -> dict[str, Any]:
+def _load_trace_dump(pt_path: Path) -> Any:
+    if pt_path.suffix.lower() == ".json":
+        with pt_path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+
     before_missing = len(_MISSING_PICKLE_GLOBALS)
     data = torch.load(
         pt_path,
@@ -579,7 +620,122 @@ def _build_cache_data(pt_path: Path) -> dict[str, Any]:
             f"[trace_timeline_viewer] substituted missing pickle globals with dummy classes: {missing_names}",
             file=sys.stderr,
         )
-    samples = data["samples"] if isinstance(data, dict) and "samples" in data else data
+    return data
+
+
+def _resolve_manifest_path(base_path: Path, value: Any) -> Path | None:
+    if not isinstance(value, str):
+        return None
+    if not value.endswith((".pt", ".pth")):
+        return None
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = base_path.parent / path
+    return path.resolve()
+
+
+def _samples_from_trajectory(data: Any) -> Any | None:
+    if isinstance(data, dict) and "samples" in data:
+        return data["samples"]
+    if isinstance(data, (list, tuple)):
+        return data
+    return None
+
+
+def _looks_like_trajectory(data: Any) -> bool:
+    samples = _samples_from_trajectory(data)
+    if samples is None:
+        return False
+    if len(samples) == 0:
+        return True
+    sample = _to_sample_dict(samples[0])
+    return isinstance(sample, dict) and "trace" in sample
+
+
+def _safe_step_name(value: Any) -> str:
+    text = str(value)
+    text = re.sub(r"[^A-Za-z0-9_.-]+", "_", text).strip("._")
+    return text or "step"
+
+
+def _sort_path_key(path: Path) -> tuple[int, str]:
+    try:
+        return (0, f"{int(path.stem):012d}")
+    except ValueError:
+        return (1, path.name)
+
+
+def _iter_directory_entries(directory: Path) -> list[TimelineEntry]:
+    base_paths = _timeline_paths(directory)
+    entries: list[TimelineEntry] = []
+    for path in sorted(directory.glob("*.pt"), key=_sort_path_key):
+        key = path.stem
+        safe_key = _safe_step_name(key)
+        entries.append(
+            TimelineEntry(
+                key=key,
+                title=path.name,
+                data=_load_trace_dump(path),
+                paths=TimelinePaths(
+                    pt_path=path,
+                    cache_path=base_paths.cache_path.with_name(
+                        f"{directory.name}.{safe_key}.trace_timeline_cache.json"
+                    ),
+                    html_path=base_paths.html_path.with_name(
+                        f"{directory.name}.{safe_key}.trace_timeline_viewer.html"
+                    ),
+                ),
+            )
+        )
+    return entries
+
+
+def _iter_timeline_entries(pt_path: Path, data: Any) -> list[TimelineEntry]:
+    base_paths = _timeline_paths(pt_path)
+    if _looks_like_trajectory(data):
+        return [TimelineEntry(key="rollout", title=pt_path.name, data=data, paths=base_paths)]
+
+    if not isinstance(data, dict):
+        return [TimelineEntry(key="rollout", title=pt_path.name, data=data, paths=base_paths)]
+
+    entries: list[TimelineEntry] = []
+    for key, value in sorted(data.items(), key=lambda item: str(item[0])):
+        source_path = pt_path
+        manifest_path = _resolve_manifest_path(pt_path, value)
+        if manifest_path is not None:
+            if not manifest_path.exists():
+                print(f"[trace_timeline_viewer] skipping missing trajectory path for {key}: {manifest_path}", file=sys.stderr)
+                continue
+            value = _load_trace_dump(manifest_path)
+            source_path = manifest_path
+        if not _looks_like_trajectory(value):
+            continue
+        safe_key = _safe_step_name(key)
+        entries.append(
+            TimelineEntry(
+                key=str(key),
+                title=f"{source_path.name} | {key}",
+                data=value,
+                paths=TimelinePaths(
+                    pt_path=source_path,
+                    cache_path=base_paths.cache_path.with_name(
+                        f"{pt_path.stem}.{safe_key}.trace_timeline_cache.json"
+                    ),
+                    html_path=base_paths.html_path.with_name(
+                        f"{pt_path.stem}.{safe_key}.trace_timeline_viewer.html"
+                    ),
+                ),
+            )
+        )
+    if entries:
+        return entries
+    return [TimelineEntry(key="rollout", title=pt_path.name, data=data, paths=base_paths)]
+
+
+def _build_cache_data_from_obj(pt_path: Path, data: Any, *, entry_key: str | None = None) -> dict[str, Any]:
+    samples = _samples_from_trajectory(data)
+    if samples is None:
+        samples = data
 
     rows: list[dict[str, Any]] = []
     global_start = None
@@ -597,6 +753,7 @@ def _build_cache_data(pt_path: Path) -> dict[str, Any]:
     return {
         "cache_version": CACHE_VERSION,
         "pt_path": str(pt_path),
+        "entry_key": entry_key,
         "generated_at": time.time(),
         "sample_count": len(rows),
         "global_start": _round_float(global_start),
@@ -605,9 +762,18 @@ def _build_cache_data(pt_path: Path) -> dict[str, Any]:
     }
 
 
+def _build_cache_data(pt_path: Path) -> dict[str, Any]:
+    return _build_cache_data_from_obj(pt_path, _load_trace_dump(pt_path))
+
+
 def _timeline_paths(pt_path: Path) -> TimelinePaths:
-    stem = pt_path.stem
-    directory = pt_path.parent
+    import os
+    import tempfile
+    stem = pt_path.name if pt_path.is_dir() else pt_path.stem
+    directory = pt_path if pt_path.is_dir() else pt_path.parent
+    if not os.access(directory, os.W_OK):
+        directory = Path(tempfile.gettempdir()) / "trace_timeline_viewer" / pt_path.parent.name
+        directory.mkdir(parents=True, exist_ok=True)
     return TimelinePaths(
         pt_path=pt_path,
         cache_path=directory / f"{stem}.trace_timeline_cache.json",
@@ -623,6 +789,20 @@ def ensure_cache(paths: TimelinePaths, rebuild: bool = False) -> dict[str, Any]:
             return cached
 
     cache_data = _build_cache_data(paths.pt_path)
+    with paths.cache_path.open("w", encoding="utf-8") as handle:
+        json.dump(cache_data, handle, ensure_ascii=True, separators=(",", ":"))
+    return cache_data
+
+
+def ensure_entry_cache(entry: TimelineEntry, rebuild: bool = False) -> dict[str, Any]:
+    paths = entry.paths
+    if not rebuild and paths.cache_path.exists() and paths.cache_path.stat().st_mtime >= paths.pt_path.stat().st_mtime:
+        with paths.cache_path.open("r", encoding="utf-8") as handle:
+            cached = json.load(handle)
+        if cached.get("cache_version") == CACHE_VERSION:
+            return cached
+
+    cache_data = _build_cache_data_from_obj(paths.pt_path, entry.data, entry_key=entry.key)
     with paths.cache_path.open("w", encoding="utf-8") as handle:
         json.dump(cache_data, handle, ensure_ascii=True, separators=(",", ":"))
     return cache_data
@@ -659,7 +839,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       overflow: hidden;
       padding: 18px;
       display: grid;
-      grid-template-rows: auto auto minmax(0, 1fr);
+      grid-template-rows: auto auto minmax(170px, 22vh) minmax(360px, 1fr);
       gap: 12px;
     }
     .panel {
@@ -747,6 +927,76 @@ HTML_TEMPLATE = r"""<!doctype html>
     .stat .value {
       font-size: 20px;
       font-weight: 700;
+    }
+    .sample-detail {
+      min-height: 0;
+      overflow: hidden;
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+    }
+    .sample-detail-header {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      justify-content: space-between;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .sample-detail-title {
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 700;
+    }
+    .sample-detail-body {
+      padding: 10px 14px;
+      overflow: auto;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      max-height: none;
+    }
+    .detail-block {
+      min-width: 0;
+      display: grid;
+      gap: 6px;
+    }
+    .detail-block.full {
+      grid-column: 1 / -1;
+    }
+    .detail-label {
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+    }
+    .detail-value {
+      margin: 0;
+      padding: 9px 10px;
+      border: 1px solid rgba(216, 206, 191, 0.75);
+      background: rgba(255, 253, 248, 0.72);
+      color: #25221d;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font-family: "Iosevka", "IBM Plex Mono", monospace;
+      font-size: 12px;
+      line-height: 1.45;
+      max-height: 220px;
+      overflow: auto;
+    }
+    .detail-block.code .detail-value {
+      max-height: 180px;
+      background: #15181b;
+      border-color: #2d343a;
+      color: #e8edf1;
+    }
+    .detail-block.response .detail-value {
+      max-height: 160px;
+    }
+    .detail-block.prompt .detail-value {
+      max-height: 140px;
+      font-size: 11px;
+      line-height: 1.35;
     }
     .swatch {
       width: 12px;
@@ -854,6 +1104,15 @@ HTML_TEMPLATE = r"""<!doctype html>
       font-size: 12px;
     }
     body.compact-ui .controls-extra { display: none; }
+    body.compact-ui .sample-detail { display: none; }
+    @media (max-width: 900px) {
+      .page {
+        grid-template-rows: auto auto minmax(160px, 24vh) minmax(320px, 1fr);
+      }
+      .sample-detail-body {
+        grid-template-columns: 1fr;
+      }
+    }
   </style>
 </head>
 <body>
@@ -916,6 +1175,14 @@ HTML_TEMPLATE = r"""<!doctype html>
       <div id="stats" class="stats-grid"></div>
     </div>
 
+    <div class="panel sample-detail" id="sampleDetail">
+      <div class="sample-detail-header">
+        <span class="sample-detail-title" id="sampleDetailTitle">Sample Detail</span>
+        <span id="sampleDetailMeta"></span>
+      </div>
+      <div class="sample-detail-body" id="sampleDetailBody"></div>
+    </div>
+
     <div class="panel timeline-panel">
       <div id="legend" class="legend"></div>
       <div id="viewport" class="viewport">
@@ -946,6 +1213,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       cursorTime: null,
       hoveredItem: null,
       selectedItem: null,
+      selectedRowId: null,
       dragging: false,
       dragStartX: 0,
       dragViewStart: 0,
@@ -983,6 +1251,24 @@ HTML_TEMPLATE = r"""<!doctype html>
         .replaceAll('>', '&gt;')
         .replaceAll('"', '&quot;')
         .replaceAll("'", '&#39;');
+    }
+
+    function detailText(value) {
+      if (value == null || value === '') return 'n/a';
+      if (typeof value === 'string') return value;
+      return JSON.stringify(value, null, 2);
+    }
+
+    function detailBlock(label, value, full = false, className = '') {
+      const classes = ['detail-block'];
+      if (full) classes.push('full');
+      if (className) classes.push(className);
+      return `
+        <div class="${classes.map(escapeHtml).join(' ')}">
+          <div class="detail-label">${escapeHtml(label)}</div>
+          <pre class="detail-value">${escapeHtml(detailText(value))}</pre>
+        </div>
+      `;
     }
 
     function hashHue(name) {
@@ -1062,6 +1348,65 @@ HTML_TEMPLATE = r"""<!doctype html>
       };
     }
 
+    function selectedDetailRow() {
+      if (state.selectedRowId != null) {
+        const row = state.rows.find(candidate => candidate.row_id === state.selectedRowId);
+        if (row) return row;
+      }
+      if (state.selectedItem?.row && state.rows.includes(state.selectedItem.row)) return state.selectedItem.row;
+      return state.rows[0] || null;
+    }
+
+    function updateSampleDetail() {
+      const row = selectedDetailRow();
+      const title = document.getElementById('sampleDetailTitle');
+      const meta = document.getElementById('sampleDetailMeta');
+      const body = document.getElementById('sampleDetailBody');
+      if (!row) {
+        title.textContent = 'Sample Detail';
+        meta.textContent = 'no filtered samples';
+        body.innerHTML = '';
+        return;
+      }
+
+      const sampleId = row.sample_index ?? row.row_id;
+      title.textContent = `Sample #${sampleId}`;
+      meta.textContent = [
+        row.source ? `source=${row.source}` : null,
+        row.status ? `status=${row.status}` : null,
+        row.reward != null ? `reward=${niceNumber(row.reward)}` : null,
+        row.duration != null ? `duration=${niceDuration(row.duration)}` : null,
+      ].filter(Boolean).join(' | ');
+
+      const summary = {
+        row_id: row.row_id,
+        sample_index: row.sample_index,
+        group_index: row.group_index,
+        source: row.source,
+        status: row.status,
+        label: row.label,
+        reward: row.reward,
+        response_length: row.response_length,
+        response_chars: row.response_char_count,
+        cpp_chars: typeof row.response_cpp === 'string' ? row.response_cpp.length : 0,
+        trace_id: row.trace_id,
+        attempt: row.attempt,
+        spans: row.closed_span_count,
+        open_spans: row.open_span_count,
+        events: row.point_event_count,
+      };
+      const blocks = [
+        detailBlock('summary', summary),
+        detailBlock('metadata', row.metadata),
+        detailBlock('prompt', row.prompt, true, 'prompt'),
+      ];
+      if (row.response_cpp) {
+        blocks.push(detailBlock('extracted C++ code', row.response_cpp, true, 'code'));
+      }
+      blocks.push(detailBlock('full response', row.response, true, 'response'));
+      body.innerHTML = blocks.join('');
+    }
+
     function sampleMatches(row, filterText) {
       if (!filterText) return true;
       const haystack = [
@@ -1071,6 +1416,10 @@ HTML_TEMPLATE = r"""<!doctype html>
         row.status,
         row.label,
         row.trace_id,
+        row.prompt,
+        row.response,
+        row.response_cpp,
+        JSON.stringify(row.metadata || {}),
       ].map(v => `${v ?? ''}`.toLowerCase()).join(' ');
       return haystack.includes(filterText.toLowerCase());
     }
@@ -1278,6 +1627,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       layout();
       updateLegend();
       updateStats();
+      updateSampleDetail();
       scheduleDraw();
     }
 
@@ -2237,6 +2587,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         if (canvasX < LABEL_WIDTH) {
           if (rowIdx >= 0 && rowIdx < state.rows.length && state.viewMode !== 'expanded') {
             const row = state.rows[rowIdx];
+            state.selectedRowId = row.row_id;
             state.selectedItem = { row, item: rowSummaryItem(row), x: event.clientX, y: event.clientY };
             if (state.expandedRows.has(row.row_id)) {
               state.expandedRows.delete(row.row_id);
@@ -2245,6 +2596,7 @@ HTML_TEMPLATE = r"""<!doctype html>
             }
             layout();
             updateTooltip();
+            updateSampleDetail();
             scheduleDraw();
           }
           return;
@@ -2253,10 +2605,12 @@ HTML_TEMPLATE = r"""<!doctype html>
         state.selectedItem = null;
         if (rowIdx >= 0 && rowIdx < state.rows.length) {
           const row = state.rows[rowIdx];
+          state.selectedRowId = row.row_id;
           const item = findItemAt(row, rowIdx, canvasX, canvasY);
           if (item) state.selectedItem = { row, item, x: event.clientX, y: event.clientY };
         }
         updateStats();
+        updateSampleDetail();
         scheduleDraw();
       });
       canvas.addEventListener('wheel', (event) => {
@@ -2283,7 +2637,9 @@ HTML_TEMPLATE = r"""<!doctype html>
     async function boot() {
       const response = await fetch(CACHE_FILE);
       const data = await response.json();
-      document.getElementById('title').textContent = data.pt_path.split('/').pop() + ' trace timeline';
+      const titleParts = [data.pt_path.split('/').pop()];
+      if (data.entry_key) titleParts.push(data.entry_key);
+      document.getElementById('title').textContent = titleParts.join(' | ') + ' trace timeline';
       state.rawRows = data.rows || [];
       const attemptValues = [...new Set(
         state.rawRows.flatMap(row => (row.items || []).map(item => item.attempt)).filter(v => v != null)
@@ -2310,11 +2666,107 @@ HTML_TEMPLATE = r"""<!doctype html>
 """
 
 
+INDEX_TEMPLATE = r"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>__TITLE__</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      padding: 24px;
+      font-family: "Iosevka Aile", "IBM Plex Sans", sans-serif;
+      color: #22201c;
+      background: #f4f1ea;
+    }
+    main { max-width: 980px; margin: 0 auto; }
+    h1 { margin: 0 0 8px; font-size: 22px; }
+    .meta { color: #6f675d; margin-bottom: 18px; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: rgba(255, 250, 242, 0.92);
+      border: 1px solid #d8cebf;
+    }
+    th, td {
+      padding: 10px 12px;
+      border-bottom: 1px solid #d8cebf;
+      text-align: left;
+      font-size: 13px;
+    }
+    th { color: #6f675d; font-weight: 700; }
+    a { color: #9b421f; text-decoration: none; font-weight: 700; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>__TITLE__</h1>
+    <div class="meta">__COUNT__ trajectory pages</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Step</th>
+          <th>Samples</th>
+          <th>Duration</th>
+          <th>Page</th>
+        </tr>
+      </thead>
+      <tbody>
+        __ROWS__
+      </tbody>
+    </table>
+  </main>
+</body>
+</html>
+"""
+
+
 def ensure_html(paths: TimelinePaths) -> None:
     title = f"{paths.pt_path.name} trace timeline"
     html = HTML_TEMPLATE.replace("__CACHE_FILE__", paths.cache_path.name).replace("__TITLE__", title)
     with paths.html_path.open("w", encoding="utf-8") as handle:
         handle.write(html)
+
+
+def ensure_entry_html(entry: TimelineEntry) -> None:
+    title = f"{entry.title} trace timeline"
+    rendered = HTML_TEMPLATE.replace("__CACHE_FILE__", entry.paths.cache_path.name).replace("__TITLE__", title)
+    with entry.paths.html_path.open("w", encoding="utf-8") as handle:
+        handle.write(rendered)
+
+
+def ensure_index_html(pt_path: Path, entries: list[tuple[TimelineEntry, dict[str, Any]]]) -> Path:
+    paths = _timeline_paths(pt_path)
+    index_path = paths.html_path.with_name(f"{pt_path.stem}.trace_timeline_index.html")
+    rows = []
+    for entry, cache_data in entries:
+        duration = cache_data.get("global_end")
+        start = cache_data.get("global_start")
+        if duration is not None and start is not None:
+            duration_text = f"{max(0.0, float(duration) - float(start)):.3f}s"
+        else:
+            duration_text = "n/a"
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(entry.key)}</td>"
+            f"<td>{html.escape(str(cache_data.get('sample_count', 0)))}</td>"
+            f"<td>{html.escape(duration_text)}</td>"
+            f"<td><a href=\"{html.escape(entry.paths.html_path.name)}\">open</a></td>"
+            "</tr>"
+        )
+    title = f"{pt_path.name} trace trajectories"
+    rendered = (
+        INDEX_TEMPLATE.replace("__TITLE__", html.escape(title))
+        .replace("__COUNT__", str(len(entries)))
+        .replace("__ROWS__", "\n".join(rows))
+    )
+    with index_path.open("w", encoding="utf-8") as handle:
+        handle.write(rendered)
+    return index_path
 
 
 class QuietHandler(SimpleHTTPRequestHandler):
@@ -2335,7 +2787,13 @@ def serve_directory(directory: Path, port: int) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("pt_path", help="Path to rollout debug dump .pt file")
+    parser.add_argument(
+        "pt_path",
+        help=(
+            "Path to rollout debug dump .pt/.json file or a directory of .pt files; "
+            "top-level {step: trajectory} or {step: pt_path} dictionaries render as an index"
+        ),
+    )
     parser.add_argument("--rebuild", action="store_true", help="Rebuild cache even if it already exists")
     parser.add_argument(
         "--serve",
@@ -2353,17 +2811,37 @@ def main() -> None:
     if not pt_path.exists():
         raise SystemExit(f"pt file not found: {pt_path}")
 
-    paths = _timeline_paths(pt_path)
-    cache_data = ensure_cache(paths, rebuild=args.rebuild)
-    ensure_html(paths)
+    if pt_path.is_dir():
+        entries = _iter_directory_entries(pt_path)
+        if not entries:
+            raise SystemExit(f"no .pt files found in directory: {pt_path}")
+    else:
+        data = _load_trace_dump(pt_path)
+        entries = _iter_timeline_entries(pt_path, data)
+    rendered_entries = []
+    for entry in entries:
+        cache_data = ensure_entry_cache(entry, rebuild=args.rebuild)
+        ensure_entry_html(entry)
+        rendered_entries.append((entry, cache_data))
 
-    print(f"pt: {paths.pt_path}")
-    print(f"cache: {paths.cache_path}")
-    print(f"html: {paths.html_path}")
-    print(f"samples: {cache_data['sample_count']}")
+    if len(rendered_entries) > 1:
+        index_path = ensure_index_html(pt_path, rendered_entries)
+        primary_html = index_path
+        total_samples = sum(item[1]["sample_count"] for item in rendered_entries)
+    else:
+        primary_html = rendered_entries[0][0].paths.html_path
+        total_samples = rendered_entries[0][1]["sample_count"]
+
+    print(f"pt: {pt_path}")
+    if len(rendered_entries) == 1:
+        print(f"cache: {rendered_entries[0][0].paths.cache_path}")
+    else:
+        print(f"trajectories: {len(rendered_entries)}")
+    print(f"html: {primary_html}")
+    print(f"samples: {total_samples}")
 
     if args.serve:
-        serve_directory(paths.html_path.parent, args.port)
+        serve_directory(primary_html.parent, args.port)
 
 
 if __name__ == "__main__":

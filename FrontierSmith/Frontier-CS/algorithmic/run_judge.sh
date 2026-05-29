@@ -25,6 +25,7 @@ sudo docker run -d \
   -e JUDGE_WORKERS=32 \
   -e GJ_PARALLELISM=32 \
   -e SAVE_OUTPUTS=false \
+  -v "$(pwd)/judge/src:/app/src" \
   -v "$(pwd)/problems:/app/problems" \
   -v "$(pwd)/submissions:/app/submissions" \
   -v "$(pwd)/data:/app/data" \

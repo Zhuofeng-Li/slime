@@ -1,5 +1,15 @@
+import wandb
 from slime.utils import logging_utils
 from slime.utils.metric_utils import compute_rollout_step
+
+_metrics_defined = False
+
+
+def _ensure_metrics_defined():
+    global _metrics_defined
+    if not _metrics_defined and wandb.run is not None:
+        wandb.define_metric("frontiercs/*", step_metric="rollout/step")
+        _metrics_defined = True
 
 
 def _best_of_k_estimate(rewards: list[float], k: int) -> float:
@@ -34,11 +44,13 @@ def _reward_values(args, samples):
 
 
 def log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_time) -> bool:
+    _ensure_metrics_defined()
     rewards = _reward_values(args, samples)
     if not rewards:
         return False
 
     metrics = {
+        "frontiercs/avg_score": sum(rewards) / len(rewards),
         "frontiercs/max_score": max(rewards),
         "rollout/step": compute_rollout_step(args, rollout_id),
     }

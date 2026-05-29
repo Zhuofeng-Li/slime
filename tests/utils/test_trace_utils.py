@@ -46,7 +46,8 @@ def test_build_sglang_meta_trace_attrs_keeps_standard_and_pd_fields():
 @pytest.mark.unit
 def test_trace_timeline_viewer_omits_virtual_pd_lanes_without_pd_attrs(tmp_path: Path):
     viewer = _load_trace_timeline_viewer_module()
-    sample = Sample(index=0, prompt="hello")
+    sample = Sample(index=0, prompt="hello", response="world", reward=1.0)
+    sample.metadata = {"source": "unit", "difficulty": "easy"}
 
     with trace_span(sample, "sglang_generate", attrs={"max_new_tokens": 8}) as span:
         span.update(
@@ -70,6 +71,10 @@ def test_trace_timeline_viewer_omits_virtual_pd_lanes_without_pd_attrs(tmp_path:
     assert row["lane_count"] == 1
     assert row["item_count"] == 1
     assert row["closed_span_count"] == 1
+    assert row["prompt"] == "hello"
+    assert row["response"] == "world"
+    assert row["metadata"] == {"source": "unit", "difficulty": "easy"}
+    assert row["reward"] == 1.0
 
     item = row["items"][0]
     assert item["name"] == "sglang_generate"

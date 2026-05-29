@@ -50,7 +50,7 @@ CKPT_ARGS=(
    --ref-load "${BASE_FOLDER}/models/Qwen3.5-35B-A3B_torch_dist"
    --load "${BASE_FOLDER}/models/Qwen3.5-35B-A3B_frontiercs/"
    --save "${BASE_FOLDER}/models/Qwen3.5-35B-A3B_frontiercs/"
-   --save-interval 20
+   --save-interval 200
 )
 
 # ── Data ──────────────────────────────────────────────────────────────────
@@ -84,7 +84,6 @@ ROLLOUT_ARGS=(
 # Eval also goes through the same judge via --custom-rm-path (set globally above).
 # val.jsonl contains all problems (--full-for-both) so we get full coverage.
 EVAL_ARGS=(
-   --eval-interval 5
    --eval-prompt-data frontiercs "${BASE_FOLDER}/data/frontiercs/val.jsonl"
    --n-samples-per-eval-prompt 5
    --eval-max-response-len 81920
@@ -105,7 +104,7 @@ PERF_ARGS=(
    --recompute-num-layers 1
 
    --use-dynamic-batch-size
-   --max-tokens-per-gpu 16384
+   --max-tokens-per-gpu 40000
 )
 
 # ── GRPO (from FrontierCS 27B) ────────────────────────────────────────────
@@ -146,7 +145,10 @@ SGLANG_ARGS=(
    --rollout-num-gpus-per-engine 8
    --sglang-mem-fraction-static 0.7
    --sglang-cuda-graph-bs 1 2 4 8 $(seq 16 8 256)
+   --sglang-max-running-requests 64
+   --sglang-server-concurrency 64
    --sglang-disable-custom-all-reduce
+   --sglang-mamba-scheduler-strategy extra_buffer
 )
 
 # ── Misc ──────────────────────────────────────────────────────────────────
@@ -156,6 +158,9 @@ MISC_ARGS=(
    --accumulate-allreduce-grads-in-fp32
    --attention-softmax-in-fp32
    --attention-backend flash
+   --log-probs-chunk-size 4096
+   --train-memory-margin-bytes 0
+   --train-env-vars '{"PYTORCH_CUDA_ALLOC_CONF":"max_split_size_mb:512"}'
 )
 
 export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
