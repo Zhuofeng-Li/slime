@@ -1,1 +1,4 @@
 ExperienceName,ModelSize,Commands,FailReason
+Qwen3.5-27B-frontiercs-debug-64-h200,27B,"MASTER_ADDR=10.209.124.162 HOSTFILE=/shared/dev/zhuofeng/slime/hostfile BASE_FOLDER=/shared/dev/zhuofeng/slime WANDB_KEY=<key> FRONTIER_JUDGE_URL=http://10.209.124.162:8082 bash scripts/frontier_cs/run-frontiercs-qwen3.5-27B_debug-64_h200.sh",
+Qwen3.5-27B-frontiercs-debug-64-h200,27B,"ray job submit ... --rollout-batch-size 64 --n-samples-per-prompt 8 --global-batch-size 512 --wandb-key 206bfb00...",
+Qwen3.5-27B-frontiercs-debug-64-h200-train,27B,"ray job submit ... ROLLOUT_BATCH_SIZE=32 N_SAMPLES=8 GLOBAL_BS=256 engine=2 CUDA_GRAPH=ON Docker_judge@localhost:8082",-

@@ -18,7 +18,7 @@ from pathlib import Path
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).parent.parent
-PROBLEMS_DIR = PROJECT_ROOT / "Frontier-CS" / "algorithmic" / "problems"
+PROBLEMS_DIR = PROJECT_ROOT / "Frontier-CS" / "algorithmic" / "problems" / "problems"
 DEFAULT_OUT = PROJECT_ROOT / "data" / "frontiercs"
 
 

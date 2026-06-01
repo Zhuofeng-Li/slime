@@ -24,7 +24,7 @@ import random
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent.parent
-PROBLEMS_DIR = REPO_ROOT / "FrontierSmith" / "Frontier-CS" / "algorithmic" / "problems"
+PROBLEMS_DIR = REPO_ROOT / "FrontierSmith" / "Frontier-CS" / "algorithmic" / "problems" / "problems"
 DEFAULT_OUT = REPO_ROOT / "data" / "frontiercs"
 
 SYSTEM_PROMPT = (
